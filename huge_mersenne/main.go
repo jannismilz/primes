@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 )
 
 //
@@ -36,4 +37,12 @@ import (
 
 func main() {
 	fmt.Println("Hello, World!")
+
+	os.Setenv("CGO_ENABLE", "1")
+	fmt.Println(os.Getenv("CGO_ENABLE"))
+
+	err := initDB()
+	if err != nil {
+		fmt.Printf("%v", err)
+	}
 }
