@@ -2,11 +2,9 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	. "github.com/klauspost/cpuid/v2"
-	"math"
 	"os"
 	"runtime/pprof"
 	"sync"
@@ -26,19 +24,10 @@ import (
 // Store all n where min_p is larger than 8419
 // Currently on work laptop: 16m3s
 
-var RANGE_START int = 1e9 // later: 10_000_000_000
-var RANGE_END int = 2e9   // later: 20_000_000_000
-var CHUNK_SIZE int = 1e7
-
-type Result struct {
-	maxTries      int
-	maxTriesN     int
-	totalTries    int64
-	totalNumbers  int64
-	averageTries  float64
-	processedTime time.Duration
-	pairs         [][2]int // Store (n, minPrime) pairs for verification
-}
+var RANGE_START int = 1e8 // later: 10_000_000_000
+var RANGE_END int = 2e8   // later: 20_000_000_000
+var CHUNK_SIZE int = 1e6
+var RECORD_TRESHOLD int = 8419
 
 func main() {
 	f, err := os.Create("cpu.prof")
@@ -53,12 +42,12 @@ func main() {
 
 	startTime := time.Now()
 
-	// Get all primes up to 50k for initial checking
-	smallPrimes := sieve_50k()
-	fmt.Printf("Generated %d small primes up to 50,000\n", len(smallPrimes))
+	// Get all primes up to 1e6 for initial checking
+	smallPrimes := SimpleSieve()
+	fmt.Printf("Generated %d small primes up to 1,000,000\n", len(smallPrimes))
 
 	// Get all chunks to process
-	chunks := get_chunks()
+	chunks := GetChunks(RANGE_START, RANGE_END, CHUNK_SIZE)
 	fmt.Printf("Processing %d chunks of size %d\n", len(chunks), CHUNK_SIZE)
 
 	// Process chunks in parallel
@@ -70,53 +59,49 @@ func main() {
 	var totalTries int64 = 0
 	var totalNumbers int64 = 0
 	var totalTime time.Duration = 0
-
-	// Create a global hasher for all pairs
-	globalHasher := sha256.New()
+	var totalRecordCandidates int = 0
+	var maxRecordCandidate RecordCandidate
 
 	// Sort chunks by their start value to ensure consistent hashing order
-	sortedChunks := make([]int, len(chunks))
-	copy(sortedChunks, chunks)
+	sortedResults := make([]Result, len(chunks))
 
-	// Process results in order of chunks
-	for _, chunkStart := range sortedChunks {
-		// Find the result for this chunk
-		var result Result
-		for _, r := range results {
-			if r.pairs != nil && len(r.pairs) > 0 && r.pairs[0][0] >= chunkStart && r.pairs[0][0] < chunkStart+CHUNK_SIZE {
-				result = r
-				break
-			}
-		}
+	// Place results in the correct order based on index
+	for _, result := range results {
+		sortedResults[result.index] = result
+	}
 
-		if result.pairs == nil {
-			continue
-		}
+	// Create a merkle tree of hashes
+	levelHashes := make([]string, len(sortedResults))
+	for i, result := range sortedResults {
+		levelHashes[i] = result.hash
 
 		// Update statistics
 		if result.maxTries > maxTries {
 			maxTries = result.maxTries
 			maxTriesN = result.maxTriesN
+		} else if result.maxTries == maxTries {
+			if result.maxTriesN < maxTriesN {
+				maxTriesN = result.maxTriesN
+			}
 		}
+
 		totalTries += result.totalTries
 		totalNumbers += result.totalNumbers
 		totalTime += result.processedTime
 
-		// Add all pairs from this chunk to the global hash
-		for _, pair := range result.pairs {
-			n := pair[0]
-			minPrime := pair[1]
+		// Count record candidates and find max
+		totalRecordCandidates += len(result.recordCandidates)
 
-			// Hash the (n, minPrime) pair
-			buf := make([]byte, 16)
-			binary.BigEndian.PutUint64(buf[:8], uint64(n))
-			binary.BigEndian.PutUint64(buf[8:], uint64(minPrime))
-			globalHasher.Write(buf)
+		// Check for max record candidate
+		for _, candidate := range result.recordCandidates {
+			if candidate.n > maxRecordCandidate.n {
+				maxRecordCandidate = candidate
+			}
 		}
 	}
 
-	// Generate the final hash
-	finalHash := hex.EncodeToString(globalHasher.Sum(nil))
+	// Build the merkle tree
+	finalHash := buildMerkleRoot(levelHashes)
 	averageTries := float64(totalTries) / float64(totalNumbers)
 
 	fmt.Printf("\nResults:\n")
@@ -124,6 +109,10 @@ func main() {
 	fmt.Printf("Total tries: %d\n", totalTries)
 	fmt.Printf("Average tries per number: %.2f\n", averageTries)
 	fmt.Printf("Maximum tries: %d (for n=%d)\n", maxTries, maxTriesN)
+	fmt.Printf("Total record candidates: %d\n", totalRecordCandidates)
+	if maxRecordCandidate.n > 0 {
+		fmt.Printf("Max record candidate: n=%d, minPrime=%d\n", maxRecordCandidate.n, maxRecordCandidate.minP)
+	}
 	fmt.Printf("Total processing time: %.4fs\n", totalTime.Seconds())
 	fmt.Printf("Total elapsed time: %.4fs\n", time.Since(startTime).Seconds())
 	fmt.Printf("Verification hash: %s\n", finalHash)
@@ -132,84 +121,13 @@ func main() {
 	fmt.Println("CPU Cores:", CPU.PhysicalCores)
 }
 
-func sieve_50k() []int {
-	primes := make([]bool, 50_001)
-	var result []int
-
-	for i := range primes {
-		primes[i] = true
-	}
-
-	primes[0] = false
-	primes[1] = false
-
-	for i, isPrime := range primes {
-		if !isPrime {
-			continue
-		}
-		result = append(result, i)
-		for j := i * i; j < len(primes); j += i {
-			primes[j] = false
-		}
-	}
-
-	return result
-}
-
-func sieve_between(start, end int) []bool {
-	size := end - start + 1
-	primes := make([]bool, size)
-
-	// Initialize all as prime
-	for i := range primes {
-		primes[i] = true
-	}
-
-	// Handle special cases for 0 and 1
-	if start <= 0 && end >= 0 {
-		primes[0-start] = false
-	}
-	if start <= 1 && end >= 1 {
-		primes[1-start] = false
-	}
-
-	// Apply sieve
-	sqrtEnd := int(math.Sqrt(float64(end)))
-	for i := 2; i <= sqrtEnd; i++ {
-		// Find the first multiple of i in the range
-		firstMultiple := start
-		if firstMultiple < i*i {
-			firstMultiple = i * i
-		} else {
-			firstMultiple = ((start + i - 1) / i) * i // Round up to nearest multiple of i
-		}
-
-		// Mark all multiples as non-prime
-		for j := firstMultiple; j <= end; j += i {
-			primes[j-start] = false
-		}
-	}
-
-	return primes
-}
-
-func get_chunks() []int {
-	chunks := make([]int, 0)
-
-	for i := RANGE_START; i < RANGE_END; i += CHUNK_SIZE {
-		chunks = append(chunks, i)
-	}
-
-	return chunks
-}
-
 func processChunks(chunks []int, smallPrimes []int) []Result {
 	numWorkers := CPU.PhysicalCores
 	var wg sync.WaitGroup
 	resultChan := make(chan Result, len(chunks))
 	chunkChan := make(chan int, len(chunks))
 
-	// Send all chunks to the channel
+	// Send all chunks to the channel with their index
 	for _, chunk := range chunks {
 		chunkChan <- chunk
 	}
@@ -221,10 +139,24 @@ func processChunks(chunks []int, smallPrimes []int) []Result {
 		go func() {
 			defer wg.Done()
 			for chunkStart := range chunkChan {
-				result := processChunk(chunkStart, chunkStart+CHUNK_SIZE-1, smallPrimes)
+				// Find the index of this chunk
+				index := -1
+				for i, c := range chunks {
+					if c == chunkStart {
+						index = i
+						break
+					}
+				}
+
+				if index == -1 {
+					fmt.Printf("Error: Could not find index for chunk %d\n", chunkStart)
+					continue
+				}
+
+				result := ProcessChunk(index, chunkStart, chunkStart+CHUNK_SIZE-1, smallPrimes, RECORD_TRESHOLD)
 				resultChan <- result
-				fmt.Printf("Processed chunk starting at %d: max tries=%d for n=%d, avg=%.2f, pairs=%d\n",
-					chunkStart, result.maxTries, result.maxTriesN, result.averageTries, len(result.pairs))
+				fmt.Printf("Processed chunk %d starting at %d: candidates=%d, avg=%.2f\n",
+					index, chunkStart, len(result.recordCandidates), result.averageTries)
 			}
 		}()
 	}
@@ -242,106 +174,24 @@ func processChunks(chunks []int, smallPrimes []int) []Result {
 	return results
 }
 
-func processChunk(start, end int, smallPrimes []int) Result {
-	startTime := time.Now()
-
-	// Ensure we only process even numbers
-	if start%2 == 1 {
-		start++
+// Function to build a merkle root hash from a list of hashes
+func buildMerkleRoot(hashes []string) string {
+	if len(hashes) == 0 {
+		return ""
 	}
 
-	// Generate primes for this chunk and a bit before (for checking)
-	bufferSize := 50_000 // Buffer to ensure we have enough primes for checking
-	chunkPrimesMap := sieve_between(start-bufferSize, end)
-
-	// Convert boolean map to slice of actual prime numbers
-	chunkPrimes := make([]int, 0)
-	for i := 0; i < len(chunkPrimesMap); i++ {
-		if chunkPrimesMap[i] {
-			chunkPrimes = append(chunkPrimes, i+(start-bufferSize))
-		}
+	if len(hashes) == 1 {
+		return hashes[0]
 	}
 
-	// Create a map for faster lookups
-	isPrime := make(map[int]bool)
-	for _, p := range smallPrimes {
-		isPrime[p] = true
-	}
-	for _, p := range chunkPrimes {
-		isPrime[p] = true
+	// Concatenate all hashes together
+	allHashes := ""
+	for _, hash := range hashes {
+		allHashes += hash
 	}
 
-	result := Result{
-		maxTries:     0,
-		maxTriesN:    0,
-		totalTries:   0,
-		totalNumbers: 0,
-		pairs:        make([][2]int, 0, (end-start)/2+1), // Pre-allocate for all even numbers
-	}
-
-	// Check each even number in the range
-	for n := start; n <= end; n += 2 {
-		if n <= 2 {
-			continue // Skip 2 as it's not applicable to Goldbach conjecture
-		}
-
-		result.totalNumbers++
-		tries := 0
-		found := false
-		var minPrime int
-
-		// Try each prime p and check if n-p is also prime
-		for _, p := range smallPrimes {
-			if p >= n {
-				break
-			}
-
-			tries++
-			complement := n - p
-
-			if isPrime[complement] {
-				found = true
-				minPrime = p
-				break
-			}
-		}
-
-		// If not found in small primes, check in chunk primes
-		if !found {
-			for _, p := range chunkPrimes {
-				if p >= n {
-					break
-				}
-
-				tries++
-				complement := n - p
-
-				if isPrime[complement] {
-					found = true
-					minPrime = p
-					break
-				}
-			}
-		}
-
-		// Update statistics
-		result.totalTries += int64(tries)
-		if tries > result.maxTries {
-			result.maxTries = tries
-			result.maxTriesN = n
-		}
-
-		// Verify the conjecture
-		if !found {
-			fmt.Printf("CONJECTURE FAILED for n=%d\n", n)
-		} else {
-			// Store the (n, minPrime) pair for later hashing
-			result.pairs = append(result.pairs, [2]int{n, minPrime})
-		}
-	}
-
-	result.processedTime = time.Since(startTime)
-	result.averageTries = float64(result.totalTries) / float64(result.totalNumbers)
-
-	return result
+	// Hash the concatenated string
+	h := sha256.New()
+	h.Write([]byte(allHashes))
+	return hex.EncodeToString(h.Sum(nil))
 }
