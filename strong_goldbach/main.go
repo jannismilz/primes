@@ -7,6 +7,8 @@ import (
 	"fmt"
 	. "github.com/klauspost/cpuid/v2"
 	"math"
+	"os"
+	"runtime/pprof"
 	"sync"
 	"time"
 )
@@ -24,9 +26,9 @@ import (
 // Store all n where min_p is larger than 8419
 // Currently on work laptop: 16m3s
 
-var RANGE_START int = 1e8 // later: 10_000_000_000
-var RANGE_END int = 2e8   // later: 20_000_000_000
-var CHUNK_SIZE int = 1e6
+var RANGE_START int = 1e9 // later: 10_000_000_000
+var RANGE_END int = 2e9   // later: 20_000_000_000
+var CHUNK_SIZE int = 1e7
 
 type Result struct {
 	maxTries      int
@@ -39,6 +41,13 @@ type Result struct {
 }
 
 func main() {
+	f, err := os.Create("cpu.prof")
+	if err != nil {
+		panic(err)
+	}
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
+
 	fmt.Println("Verifying Strong Goldbach Conjecture")
 	fmt.Printf("Range: %d to %d\n", RANGE_START, RANGE_END)
 
