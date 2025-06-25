@@ -5,8 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	. "github.com/klauspost/cpuid/v2"
 	"math"
-	"runtime"
 	"sync"
 	"time"
 )
@@ -20,6 +20,9 @@ import (
 // Process in chunks of 10^7
 // Create sieve from chunk * 10^7-50'000 to chunk * 10^7
 // Check all even numbers in the range and search for min_p so that n - min_p = is prime
+
+// Store all n where min_p is larger than 8419
+// Currently on work laptop: 16m3s
 
 var RANGE_START int = 1e8 // later: 10_000_000_000
 var RANGE_END int = 2e8   // later: 20_000_000_000
@@ -109,11 +112,15 @@ func main() {
 
 	fmt.Printf("\nResults:\n")
 	fmt.Printf("Total even numbers checked: %d\n", totalNumbers)
+	fmt.Printf("Total tries: %d\n", totalTries)
 	fmt.Printf("Average tries per number: %.2f\n", averageTries)
 	fmt.Printf("Maximum tries: %d (for n=%d)\n", maxTries, maxTriesN)
-	fmt.Printf("Total processing time: %v\n", totalTime)
-	fmt.Printf("Total elapsed time: %v\n", time.Since(startTime))
+	fmt.Printf("Total processing time: %.4fs\n", totalTime.Seconds())
+	fmt.Printf("Total elapsed time: %.4fs\n", time.Since(startTime).Seconds())
 	fmt.Printf("Verification hash: %s\n", finalHash)
+	fmt.Printf("CPU Name: %s\n", CPU.BrandName)
+	fmt.Printf("CPU Frequency: %d\n", CPU.Hz)
+	fmt.Println("CPU Cores:", CPU.PhysicalCores)
 }
 
 func sieve_50k() []int {
@@ -188,7 +195,7 @@ func get_chunks() []int {
 }
 
 func processChunks(chunks []int, smallPrimes []int) []Result {
-	numWorkers := runtime.NumCPU()
+	numWorkers := CPU.PhysicalCores
 	var wg sync.WaitGroup
 	resultChan := make(chan Result, len(chunks))
 	chunkChan := make(chan int, len(chunks))
