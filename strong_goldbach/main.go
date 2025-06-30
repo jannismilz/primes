@@ -27,7 +27,7 @@ import (
 var RANGE_START int = 1e8 // later: 10_000_000_000
 var RANGE_END int = 2e8   // later: 20_000_000_000
 var CHUNK_SIZE int = 1e6
-var RECORD_TRESHOLD int = 8419
+var RECORD_THRESHOLD int = 8419
 
 func main() {
 	f, err := os.Create("cpu.prof")
@@ -37,21 +37,24 @@ func main() {
 	pprof.StartCPUProfile(f)
 	defer pprof.StopCPUProfile()
 
+	/* fmt.Printf("Primes %v", SimpleSieve())
+	os.Exit(0) */
+
 	fmt.Println("Verifying Strong Goldbach Conjecture")
 	fmt.Printf("Range: %d to %d\n", RANGE_START, RANGE_END)
 
 	startTime := time.Now()
 
 	// Get all primes up to 1e6 for initial checking
-	smallPrimes := SimpleSieve()
-	fmt.Printf("Generated %d small primes up to 1,000,000\n", len(smallPrimes))
+	/* smallPrimes := SimpleSieve()
+	fmt.Printf("Generated %d small primes up to 1,000,000\n", len(smallPrimes)) */
 
 	// Get all chunks to process
 	chunks := GetChunks(RANGE_START, RANGE_END, CHUNK_SIZE)
 	fmt.Printf("Processing %d chunks of size %d\n", len(chunks), CHUNK_SIZE)
 
 	// Process chunks in parallel
-	results := processChunks(chunks, smallPrimes)
+	results := processChunks(chunks)
 
 	// Aggregate results
 	maxTries := 0
@@ -62,45 +65,38 @@ func main() {
 	var totalRecordCandidates int = 0
 	var maxRecordCandidate RecordCandidate
 
-	// Sort chunks by their start value to ensure consistent hashing order
 	sortedResults := make([]Result, len(chunks))
 
-	// Place results in the correct order based on index
 	for _, result := range results {
 		sortedResults[result.index] = result
 	}
 
-	// Create a merkle tree of hashes
 	levelHashes := make([]string, len(sortedResults))
+
 	for i, result := range sortedResults {
 		levelHashes[i] = result.hash
 
-		// Update statistics
 		if result.maxTries > maxTries {
 			maxTries = result.maxTries
 			maxTriesN = result.maxTriesN
-		} else if result.maxTries == maxTries {
-			if result.maxTriesN < maxTriesN {
-				maxTriesN = result.maxTriesN
-			}
+		} else if result.maxTries == maxTries && result.maxTriesN > maxTriesN {
+			maxTriesN = result.maxTriesN
 		}
 
 		totalTries += result.totalTries
 		totalNumbers += result.totalNumbers
 		totalTime += result.processedTime
 
-		// Count record candidates and find max
 		totalRecordCandidates += len(result.recordCandidates)
 
 		// Check for max record candidate
 		for _, candidate := range result.recordCandidates {
-			if candidate.n > maxRecordCandidate.n {
+			if candidate.minP > maxRecordCandidate.minP {
 				maxRecordCandidate = candidate
 			}
 		}
 	}
 
-	// Build the merkle tree
 	finalHash := buildMerkleRoot(levelHashes)
 	averageTries := float64(totalTries) / float64(totalNumbers)
 
@@ -121,8 +117,8 @@ func main() {
 	fmt.Println("CPU Cores:", CPU.PhysicalCores)
 }
 
-func processChunks(chunks []int, smallPrimes []int) []Result {
-	numWorkers := CPU.PhysicalCores
+func processChunks(chunks []int /*, smallPrimes []int */) []Result {
+	numWorkers := 1 // CPU.PhysicalCores
 	var wg sync.WaitGroup
 	resultChan := make(chan Result, len(chunks))
 	chunkChan := make(chan int, len(chunks))
@@ -133,13 +129,13 @@ func processChunks(chunks []int, smallPrimes []int) []Result {
 	}
 	close(chunkChan)
 
-	// Start workers
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for chunkStart := range chunkChan {
 				// Find the index of this chunk
+				// TODO: Clean this up so that we can somehow make this better with the ordering afterwards
 				index := -1
 				for i, c := range chunks {
 					if c == chunkStart {
@@ -153,7 +149,7 @@ func processChunks(chunks []int, smallPrimes []int) []Result {
 					continue
 				}
 
-				result := ProcessChunk(index, chunkStart, chunkStart+CHUNK_SIZE-1, smallPrimes, RECORD_TRESHOLD)
+				result := ProcessChunk(index, chunkStart, chunkStart+CHUNK_SIZE-1, RECORD_THRESHOLD)
 				resultChan <- result
 				fmt.Printf("Processed chunk %d starting at %d: candidates=%d, avg=%.2f\n",
 					index, chunkStart, len(result.recordCandidates), result.averageTries)
@@ -174,7 +170,6 @@ func processChunks(chunks []int, smallPrimes []int) []Result {
 	return results
 }
 
-// Function to build a merkle root hash from a list of hashes
 func buildMerkleRoot(hashes []string) string {
 	if len(hashes) == 0 {
 		return ""
@@ -184,13 +179,11 @@ func buildMerkleRoot(hashes []string) string {
 		return hashes[0]
 	}
 
-	// Concatenate all hashes together
 	allHashes := ""
 	for _, hash := range hashes {
 		allHashes += hash
 	}
 
-	// Hash the concatenated string
 	h := sha256.New()
 	h.Write([]byte(allHashes))
 	return hex.EncodeToString(h.Sum(nil))

@@ -1,9 +1,11 @@
 package main
 
-import "math"
+import (
+	"math"
+)
 
 func SimpleSieve() []int {
-	primes := make([]bool, 1e6)
+	primes := make([]bool, 20000)
 	var result []int
 
 	for i := range primes {
@@ -24,6 +26,27 @@ func SimpleSieve() []int {
 	}
 
 	return result
+}
+
+func SieveForChunk(start int, size int) map[int]bool {
+	// Using a map where keys are the prime numbers
+	primeMap := make(map[int]bool)
+
+	// Initialize all numbers from 2 to size-1 as potential primes
+	for i := 2; i < size; i++ {
+		primeMap[start+i] = true
+	}
+
+	// Apply the sieve
+	for i := 2; i < size; i++ {
+		if primeMap[i] {
+			for j := i * i; j < size; j += i {
+				delete(primeMap, j)
+			}
+		}
+	}
+
+	return primeMap
 }
 
 func SieveBetween(start int, end int) []bool {
